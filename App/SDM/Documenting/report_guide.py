@@ -802,8 +802,7 @@ class ReportGuide:
             'unimputed_low_quality_percent_of_day': 'Unimputed low-quality duration divided by 24 hours (0–1; fixed 24h denominator)',
             'imputed_low_quality_percent_of_day': 'Imputed low-quality duration divided by 24 hours (0–1; fixed 24h denominator)',
             'tac_day_missing': '1 if this day row was inserted to represent a study day with no TAC day-level data; 0 if observed from TAC processing',
-            'invalid_region_curve_overlap': '1 if any curve overlaps this day where duration_CURVE > 60 min and REGION_VALID = 0 (used to treat non-drinking days as unknown when applicable); 0 otherwise',
-            'unknown_reason': 'Reason label for unknown-classified day rows (blank otherwise): invalid_region_curve, tac_day_missing, or low_quality_day',
+            'unknown_reason': 'Reason label for unknown-classified day rows (blank otherwise): prediction_unreliable or missing_day_expanded',
             
             # Gap analysis
             'gap_duration': 'Duration of data gaps (hours)',
@@ -886,18 +885,23 @@ class ReportGuide:
             
             # Drinking curve overlap detection
             'drinking_curve_overlap': 'Whether any drinking curve overlapped with this day (0/1)',
-            'predicted_drinking_curve_overlap': 'Whether any predicted drinking curve overlapped with this day based on DRINKING_PRED (0/1)',
-            'predicted_drinking_day_by_curve_start': (
-                'Drinking day (0/1): 1 if any curve with DRINKING_PRED=1 has begin_CURVE inside '
-                '[begin_day, end_day), or if above_threshold_percent_of_day ≥ 0.75 and '
-                'above_threshold_high_quality_percent > 0.60 (day-level fractions; curve QC applies upstream)'
+            'pred_drinking_day': (
+                '08.05 XGBoost drinking-day prediction (1=drinking, 0=not drinking). '
+                'Scored for every day, including days with no TAC.'
             ),
+            'proba_drinking_day': 'Predicted probability of a drinking day from the 08.05 XGBoost model (0-1).',
+            'flag_non_wear': (
+                '1 when hours not worn are at least 6 (configurable). Hours not worn = day_hours - device_worn_duration, '
+                'which includes powered-off or missing time and on-device non-wear readings.'
+            ),
+            'flag_very_negative_tac': '1 when extreme_negative_duration (TAC < -15) is at least 1 hour (configurable).',
+            'flag_artifacts': '1 when jump_duration + plummet_duration is at least 1 hour (configurable).',
+            'flag_uncertain_probability': '1 when proba_drinking_day is inside [0.05, 0.95] (configurable, inclusive).',
+            'prediction_reliable': '1 when flag_non_wear, flag_very_negative_tac, flag_artifacts, and flag_uncertain_probability are all 0; else 0.',
             'total_curve_overlap_hours': 'Total hours of curve overlap with this day (sum across all curves)',
-            'predicted_drinking_overlap_hours': 'Total hours of predicted drinking curve overlap with this day (sum across DRINKING_PRED=1 curves only)',
             
             # Individual curve overlap details (dynamic based on max curves per day)
             'curve_1_id': 'ID of first curve that overlapped with this day',
-            'curve_1_predicted_drinking': 'Whether first overlapping curve was predicted drinking (DRINKING_PRED=1)',
             'curve_1_overlap_hours': 'Hours of overlap between first curve and this day',
             'curve_1_duration_CURVE': (
                 'Total duration (hours) of the first overlapping curve from ``duration_CURVE``; used with '
@@ -910,14 +914,12 @@ class ReportGuide:
             'curve_1_extends_prior_day': 'Whether first curve extends into prior day (0/1)',
             'curve_1_extends_next_day': 'Whether first curve extends into next day (0/1)',
             'curve_2_id': 'ID of second curve that overlapped with this day',
-            'curve_2_predicted_drinking': 'Whether second overlapping curve was predicted drinking (DRINKING_PRED=1)',
             'curve_2_overlap_hours': 'Hours of overlap between second curve and this day',
             'curve_2_duration_CURVE': 'Total duration (hours) of the second overlapping curve (``duration_CURVE``)',
             'curve_2_high_quality_duration': 'High-quality duration from second overlapping curve (carried forward from curve features)',
             'curve_2_extends_prior_day': 'Whether second curve extends into prior day (0/1)',
             'curve_2_extends_next_day': 'Whether second curve extends into next day (0/1)',
             'curve_3_id': 'ID of third curve that overlapped with this day',
-            'curve_3_predicted_drinking': 'Whether third overlapping curve was predicted drinking (DRINKING_PRED=1)',
             'curve_3_overlap_hours': 'Hours of overlap between third curve and this day',
             'curve_3_duration_CURVE': 'Total duration (hours) of the third overlapping curve (``duration_CURVE``)',
             'curve_3_high_quality_duration': 'High-quality duration from third overlapping curve (carried forward from curve features)',
@@ -946,11 +948,11 @@ class ReportGuide:
                 'not used as an ML feature. CONDITION_SKIPPED coerced to missing.'
             ),
             'mr_alst': (
-                'Protocol: time of first sip yesterday. Not present in current LINC morning.csv '
+                'Protocol: time of first sip yesterday. Not present in the current morning report '
                 '(column kept as missing on day rows when absent).'
             ),
             'mr_alfn': (
-                'Protocol: time of last sip yesterday. Not present in current LINC morning.csv '
+                'Protocol: time of last sip yesterday. Not present in the current morning report '
                 '(column kept as missing on day rows when absent).'
             ),
             'mr_altim_1': (
@@ -979,13 +981,14 @@ class ReportGuide:
                 '0 if outside (used to subset Agreement_summary and burst grids)'
             ),
             'self_report_and_tac_comparison': (
-                'Morning alcohol self-report vs drinking-day flag (predicted_drinking_day_by_curve_start), '
-                'with day-quality gating on non-drinking days: true_positive, false_positive, true_negative, '
-                'false_negative when sufficient data; true_unknown / false_unknown when non-drinking day and '
-                'low_quality_percent ≥ 0.25 and self-report present; positive_without_self_report when drinking day '
-                'and no morning SR; negative_without_self_report when no drinking day, no morning SR, and the day is '
-                'high-quality enough to score sufficient-data non-drinking; unknown_sr_missing when no drinking day, no morning '
-                'SR, and low_quality_percent ≥ 0.25 (unknown due to low quality, not labeled as sufficient data)'
+                'Morning alcohol self-report vs drinking-day flag (pred_drinking_day, 08.05 XGBoost). '
+                'true_positive, false_positive, true_negative, false_negative when the non-drinking day has '
+                'prediction_reliable = 1; true_unknown / false_unknown when the non-drinking day has '
+                'prediction_reliable = 0 and self-report is present; '
+                'positive_without_self_report when drinking day '
+                'and no morning SR; negative_without_self_report when no drinking day, no morning SR, and '
+                'prediction_reliable = 1; unknown_sr_missing when no drinking day, no morning '
+                'SR, and prediction_reliable = 0'
             ),
         }
 

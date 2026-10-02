@@ -1,6 +1,6 @@
 """
 Default flag settings for curve analysis.
-These settings are used by ACE, ARC, and LINC analysis scripts.
+These settings are used by cohort analysis scripts.
 """
 
 DEFAULT_FLAG_SELECTIONS = {

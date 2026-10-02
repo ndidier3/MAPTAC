@@ -67,7 +67,7 @@ days = dayFeatures(str(processed_data_folder))
 days.compute_low_quality_stats()
 
 # Optional: attach curve-based drinking-day labels
-# days.add_curve_overlap_detection(curves.curve_features)
+# days.attach_curves_and_predict_drinking_days(curves.curve_features)
 
 day_workbook = results_dir / f'{cohort_name}_day_stats_{today}.xlsx'
 days.export_workbook_days(

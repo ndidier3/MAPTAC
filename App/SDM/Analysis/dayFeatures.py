@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from App.SDM.Analysis.statModel import statModel
 from App.SDM.Configuration.file_management import load, save_to_computer
 from App.SDM.Documenting.embed_graphs import embed_graphs_into_workbook_tab
@@ -579,13 +581,27 @@ class dayFeatures():
                 os.makedirs(output_dir, exist_ok=True)
             stats_df.to_excel(output_filepath)
 
-    def add_curve_overlap_detection(
+    def add_curve_overlap_detection(self, *args, **kwargs):
+        """Deprecated. Use ``attach_curves_and_predict_drinking_days``."""
+        warnings.warn(
+            'add_curve_overlap_detection is deprecated. '
+            'Use attach_curves_and_predict_drinking_days.',
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.attach_curves_and_predict_drinking_days(*args, **kwargs)
+
+    def attach_curves_and_predict_drinking_days(
         self,
         curve_features_df=None,
-        min_curve_duration_minutes_for_invalid_region=60,
+        flag_non_wear_hours=6.0,
+        flag_very_negative_hours=1.0,
+        flag_artifact_hours=1.0,
+        flag_proba_low=0.05,
+        flag_proba_high=0.95,
     ):
         """
-        Add curve overlap detection columns to day features.
+        Attach overlapping curves to each day and score the drinking-day model.
 
         Always creates ``_MAX_CURVE_SLOTS`` (5) overlap slots, each carrying the full set of
         per-slot curve features (``curve_{n}_<suffix>`` for every suffix in
@@ -601,27 +617,30 @@ class dayFeatures():
         After populating slots, computes ``median_prior_*`` across all qualifying prior
         curves in the burst (see ``assign_median_prior_from_all_qualifying_curves``).
 
+        After curve slots are attached, scores the 08.05 drinking-day model
+        (``pred_drinking_day``, ``proba_drinking_day``) and reliability flags. Threshold
+        arguments are forwarded to that scorer. This is the day-level drinking label.
+
         Args:
             curve_features_df: DataFrame containing curve features (optional)
-            min_curve_duration_minutes_for_invalid_region: When a curve overlaps a day and has
-                ``REGION_VALID == 0``, treat the non-drinking day as unknown only if the curve duration is
-                strictly greater than this many minutes (default 60 for LINC).
+            flag_non_wear_hours: Flag when social-day hours not worn are at least this value.
+                Hours not worn are ``day_hours - device_worn_duration`` (powered-off or missing
+                time plus on-device non-wear).
+            flag_very_negative_hours: Flag when ``extreme_negative_duration`` (TAC < -15) is at least this many hours.
+            flag_artifact_hours: Flag when ``jump_duration + plummet_duration`` is at least this many hours.
+            flag_proba_low: Lower bound of the uncertain predicted-probability interval (inclusive).
+            flag_proba_high: Upper bound of the uncertain predicted-probability interval (inclusive).
         """
         print("\nAdding curve overlap detection to day features...")
 
         # Initialize curve overlap columns
         self.day_features['drinking_curve_overlap'] = 0
-        self.day_features['predicted_drinking_curve_overlap'] = 0
-        self.day_features['predicted_drinking_day_by_curve_start'] = 0
-        self.day_features['invalid_region_curve_overlap'] = 0
         self.day_features['total_curve_overlap_hours'] = 0.0
-        self.day_features['predicted_drinking_overlap_hours'] = 0.0
 
         # Always initialise 5 slots with full feature set
         _none_series = pd.Series([None] * len(self.day_features), index=self.day_features.index)
         for n in range(1, _MAX_CURVE_SLOTS + 1):
             self.day_features[f'curve_{n}_id'] = _none_series.copy()
-            self.day_features[f'curve_{n}_predicted_drinking'] = _none_series.copy()
             self.day_features[f'curve_{n}_overlap_hours'] = _none_series.copy()
             self.day_features[f'curve_{n}_high_quality_duration'] = _none_series.copy()
             self.day_features[f'curve_{n}_duration_CURVE'] = _none_series.copy()
@@ -642,7 +661,6 @@ class dayFeatures():
                 'curve_id',
                 'begin_CURVE',
                 'end_CURVE',
-                'DRINKING_PRED',
                 'high_quality_duration_CURVE',
             ]
             missing_curve_cols = [col for col in required_curve_cols if col not in curve_features_df.columns]
@@ -700,37 +718,14 @@ class dayFeatures():
 
                 self.day_features.loc[day_row.name, 'drinking_curve_overlap'] = 1
 
-                if 'REGION_VALID' in overlapping_curves.columns and 'duration_CURVE' in overlapping_curves.columns:
-                    dur_h = pd.to_numeric(overlapping_curves['duration_CURVE'], errors='coerce')
-                    invalid = pd.to_numeric(overlapping_curves['REGION_VALID'], errors='coerce').fillna(0) == 0
-                    min_h = float(min_curve_duration_minutes_for_invalid_region) / 60.0
-                    has_invalid = bool(((dur_h > min_h) & invalid).fillna(False).any())
-                    if has_invalid:
-                        self.day_features.loc[day_row.name, 'invalid_region_curve_overlap'] = 1
-
-                predicted_drinking_curves = overlapping_curves[overlapping_curves['DRINKING_PRED'] == 1]
-                if not predicted_drinking_curves.empty:
-                    self.day_features.loc[day_row.name, 'predicted_drinking_curve_overlap'] = 1
-
-                curves_starting_in_day = predicted_drinking_curves[
-                    (predicted_drinking_curves['begin_CURVE'] >= day_start) &
-                    (predicted_drinking_curves['begin_CURVE'] < day_end)
-                ]
-                if not curves_starting_in_day.empty:
-                    self.day_features.loc[day_row.name, 'predicted_drinking_day_by_curve_start'] = 1
-
                 total_overlap = 0.0
-                predicted_drinking_overlap = 0.0
                 for curve_idx, curve_row in overlapping_curves.iterrows():
                     overlap_start = max(curve_row['begin_CURVE'], day_start)
                     overlap_end = min(curve_row['end_CURVE'], day_end)
                     overlap_hours = (overlap_end - overlap_start).total_seconds() / 3600
                     total_overlap += overlap_hours
-                    if curve_row['DRINKING_PRED'] == 1:
-                        predicted_drinking_overlap += overlap_hours
 
                 self.day_features.loc[day_row.name, 'total_curve_overlap_hours'] = total_overlap
-                self.day_features.loc[day_row.name, 'predicted_drinking_overlap_hours'] = predicted_drinking_overlap
 
                 for n, (curve_idx, curve_row) in enumerate(overlapping_curves.iterrows(), 1):
                     if n > _MAX_CURVE_SLOTS:
@@ -742,7 +737,6 @@ class dayFeatures():
                     extends_next = curve_row['end_CURVE'] > day_end
 
                     self.day_features.loc[day_row.name, f'curve_{n}_id'] = curve_row['curve_id']
-                    self.day_features.loc[day_row.name, f'curve_{n}_predicted_drinking'] = int(curve_row['DRINKING_PRED'] == 1)
                     self.day_features.loc[day_row.name, f'curve_{n}_overlap_hours'] = overlap_hours
                     self.day_features.loc[day_row.name, f'curve_{n}_high_quality_duration'] = curve_row.get('high_quality_duration_CURVE', 0)
                     self.day_features.loc[day_row.name, f'curve_{n}_duration_CURVE'] = curve_row.get('duration_CURVE', np.nan)
@@ -767,24 +761,35 @@ class dayFeatures():
 
             dayFeatures.assign_median_prior_from_all_qualifying_curves(self.day_features)
             dayFeatures.assign_median_prior_day_region_tac(self.day_features)
-        
-        # OR rule: also set predicted_drinking_day_by_curve_start=1 if ≥75% of day is above-threshold and >60% of that is high-quality
-        if 'above_threshold_percent_of_day' in self.day_features.columns and 'above_threshold_high_quality_percent' in self.day_features.columns:
-            above_ok = self.day_features['above_threshold_percent_of_day'].fillna(0) >= 0.75
-            hq_ok = self.day_features['above_threshold_high_quality_percent'].fillna(0) > 0.6
-            self.day_features.loc[above_ok & hq_ok, 'predicted_drinking_day_by_curve_start'] = 1
-        
+
+        from App.SDM.Machine_Learning.drinking_day_xgb import score_drinking_days
+        _, missing_xgb = score_drinking_days(
+            self.day_features,
+            flag_non_wear_hours=flag_non_wear_hours,
+            flag_very_negative_hours=flag_very_negative_hours,
+            flag_artifact_hours=flag_artifact_hours,
+            flag_proba_low=flag_proba_low,
+            flag_proba_high=flag_proba_high,
+        )
+        if missing_xgb:
+            print(
+                f'Warning: {len(missing_xgb)} XGB drinking-day features were absent and scored as missing: '
+                f'{missing_xgb[:12]}{"..." if len(missing_xgb) > 12 else ""}'
+            )
+        n_pos = int((self.day_features['pred_drinking_day'] == 1).sum())
+        n_rel = int((self.day_features['prediction_reliable'] == 1).sum())
+        print(
+            f'XGB drinking-day scores: {n_pos} predicted drinking days, '
+            f'{n_rel} / {len(self.day_features)} prediction_reliable.'
+        )
+
         print(f"Curve overlap detection completed. Found curve overlaps on {self.day_features['drinking_curve_overlap'].sum()} days.")
         
         # Add curve overlap statistics to stats frames
         curve_stats = {
             'Days with curve overlap': self.day_features['drinking_curve_overlap'].sum(),
-            'Days with predicted drinking curve overlap': self.day_features['predicted_drinking_curve_overlap'].sum(),
-            'Days with predicted drinking curve starting in day': self.day_features['predicted_drinking_day_by_curve_start'].sum(),
             'Total curve overlap hours across all days': self.day_features['total_curve_overlap_hours'].sum(),
-            'Total predicted drinking overlap hours across all days': self.day_features['predicted_drinking_overlap_hours'].sum(),
             'Average curve overlap hours per overlapping day': self.day_features[self.day_features['drinking_curve_overlap'] == 1]['total_curve_overlap_hours'].mean() if self.day_features['drinking_curve_overlap'].sum() > 0 else 0,
-            'Average predicted drinking overlap hours per overlapping day': self.day_features[self.day_features['predicted_drinking_curve_overlap'] == 1]['predicted_drinking_overlap_hours'].mean() if self.day_features['predicted_drinking_curve_overlap'].sum() > 0 else 0,
             'Maximum curve overlap slots': _MAX_CURVE_SLOTS
         }
         
@@ -865,7 +870,7 @@ class dayFeatures():
         Expand day-level rows to a complete 1..n_days_per_burst grid per (SubID, Dataset_ID),
         using the burst anchor date from skyn metadata (first_day / metadata_skyn_first_day).
 
-        This is intended for LINC-style exports where study days 1..14 should appear even when
+        This is intended for exports where study days 1..14 should appear even when
         TAC data are missing for some days, so morning self-report can still merge onto those days.
 
         Requires skyn_meta to include: SubID, Dataset_ID, metadata_skyn_first_day.
@@ -951,9 +956,11 @@ class dayFeatures():
         merged.loc[synthetic, 'tac_day_missing'] = 1
         merged.loc[~synthetic, 'tac_day_missing'] = 0
 
-        # Defaults for synthetic: treat as non-drinking but insufficient data (unknown) under quality/wear rules.
-        if 'predicted_drinking_day_by_curve_start' in merged.columns:
-            merged.loc[synthetic, 'predicted_drinking_day_by_curve_start'] = 0
+        # Defaults for synthetic: non-drinking and unreliable, so agreement treats them as unknown.
+        if 'pred_drinking_day' in merged.columns:
+            merged.loc[synthetic, 'pred_drinking_day'] = 0
+        if 'prediction_reliable' in merged.columns:
+            merged.loc[synthetic, 'prediction_reliable'] = 0
         if 'low_quality_percent' in merged.columns:
             merged.loc[synthetic, 'low_quality_percent'] = 1.0
         if 'device_worn_percent_of_day' in merged.columns:
@@ -984,7 +991,7 @@ class dayFeatures():
             }
         )
         s = s.where(~skip, np.nan)
-        # Drink counts and 0/1 time bins are numeric in LINC; leave other types as-is.
+        # Drink counts and 0/1 time bins are numeric; leave other types as-is.
         if col == 'mr_numdk' or col.startswith('mr_altim_'):
             return pd.to_numeric(s, errors='coerce')
         return s
@@ -995,7 +1002,7 @@ class dayFeatures():
         Ensure requested attach columns exist on a morning frame (NaN if absent in CSV).
 
         ``extra_cols`` defaults to empty: only ``morning_self_report_alcohol`` is merged unless
-        a caller (e.g. LINC script) passes cohort-specific fields.
+        a caller passes cohort-specific fields.
         """
         cols = list(extra_cols) if extra_cols else []
         if not cols:
@@ -1147,24 +1154,22 @@ class dayFeatures():
     @staticmethod
     def _compute_self_report_and_tac_comparison(
         df,
-        pred_col='predicted_drinking_day_by_curve_start',
+        pred_col='pred_drinking_day',
         sr_col='morning_self_report_alcohol',
-        low_quality_col='low_quality_percent',
-        min_high_quality_pct=0.75,
     ):
         """
-        Agreement labels when non-drinking days (``pred_col`` = 0) are trusted only on high-quality days.
+        Agreement labels when non-drinking days (``pred_col`` = 0) are trusted only when
+        ``prediction_reliable`` = 1.
 
-        For those days, agreement is only treated as sufficient-data non-drinking when:
-          - ``low_quality_percent < (1 - min_high_quality_pct)`` (default < 0.25), AND
-          - ``device_worn_percent_of_day >= min_high_quality_pct`` (default >= 0.75).
+        ``prediction_reliable`` = 0 on a non-drinking day makes the agreement unknown
+        (``true_unknown``, ``false_unknown``, or ``unknown_sr_missing``).
 
-        ``true_unknown`` / ``false_unknown``: self-report yes/no but TAC negative on a **low-quality** day
-        (inconclusive for TN/FN).
+        ``true_unknown`` / ``false_unknown``: self-report yes/no but the day is not evaluable
+        as non-drinking (inconclusive for TN/FN).
 
-        ``unknown_sr_missing``: no drinking day, no merged morning self-report, and the day is *not* sufficient data
-        for non-drinking (fails the low-quality or wear-time rule above), so agreement is **unknown**
-        rather than ``negative_without_self_report``.
+        ``unknown_sr_missing``: no drinking day, no merged morning self-report, and
+        ``prediction_reliable`` is not 1, so agreement is **unknown** rather than
+        ``negative_without_self_report``.
         """
         pred = pd.to_numeric(df[pred_col], errors='coerce').fillna(0) > 0
         if sr_col not in df.columns:
@@ -1175,26 +1180,12 @@ class dayFeatures():
         sr_yes = sr == 1
         sr_no = sr == 0
 
-        # Sufficient-data non-drinking requires BOTH sufficient quality and sufficient wear-time,
-        # and must not have an overlapping invalid (REGION_VALID==0) curve of sufficient duration.
-        if low_quality_col in df.columns:
-            lq = pd.to_numeric(df[low_quality_col], errors='coerce').fillna(1.0)
-            quality_ok = lq < (1.0 - min_high_quality_pct)
+        if 'prediction_reliable' in df.columns:
+            reliable = pd.to_numeric(df['prediction_reliable'], errors='coerce').fillna(0) == 1
         else:
-            quality_ok = pd.Series(True, index=df.index)
+            reliable = pd.Series(False, index=df.index)
 
-        if 'device_worn_percent_of_day' in df.columns:
-            worn = pd.to_numeric(df['device_worn_percent_of_day'], errors='coerce').fillna(0.0)
-            wear_ok = worn >= min_high_quality_pct
-        else:
-            wear_ok = pd.Series(True, index=df.index)
-
-        if 'invalid_region_curve_overlap' in df.columns:
-            invalid_curve = pd.to_numeric(df['invalid_region_curve_overlap'], errors='coerce').fillna(0) == 1
-        else:
-            invalid_curve = pd.Series(False, index=df.index)
-
-        evaluable_non_drinking = quality_ok & wear_ok & (~invalid_curve)
+        evaluable_non_drinking = reliable
 
         out = pd.Series('negative_without_self_report', index=df.index, dtype=object)
         out.loc[(~sr_known) & pred] = 'positive_without_self_report'
@@ -1295,7 +1286,7 @@ class dayFeatures():
         hq_agreement_col,
         df_full_burst_counts=None,
     ):
-        """Build DataFrames for Agreement_summary / Stats: burst counts, day totals, HQ-stratified agreement only."""
+        """Build DataFrames for Agreement_summary / Stats: burst counts, day totals, and agreement labels."""
         if pred_col not in df_all.columns:
             return pd.DataFrame(
                 {
@@ -1310,22 +1301,12 @@ class dayFeatures():
             else pd.Series(np.nan, index=df_all.index)
         )
 
-        # TAC-based day type counts: split non-drinking days into sufficient-data vs insufficient-data (fails quality/wear/invalid-curve).
-        if 'low_quality_percent' in df_all.columns:
-            lq = pd.to_numeric(df_all['low_quality_percent'], errors='coerce').fillna(1.0)
-            quality_ok = lq < 0.25
+        # TAC-based day type counts: a non-drinking day is evaluable only when prediction_reliable = 1.
+        if 'prediction_reliable' in df_all.columns:
+            reliable = pd.to_numeric(df_all['prediction_reliable'], errors='coerce').fillna(0) == 1
         else:
-            quality_ok = pd.Series(True, index=df_all.index)
-        if 'device_worn_percent_of_day' in df_all.columns:
-            worn = pd.to_numeric(df_all['device_worn_percent_of_day'], errors='coerce').fillna(0.0)
-            wear_ok = worn >= 0.75
-        else:
-            wear_ok = pd.Series(True, index=df_all.index)
-        if 'invalid_region_curve_overlap' in df_all.columns:
-            invalid_curve = pd.to_numeric(df_all['invalid_region_curve_overlap'], errors='coerce').fillna(0) == 1
-        else:
-            invalid_curve = pd.Series(False, index=df_all.index)
-        evaluable_non_drinking = quality_ok & wear_ok & (~invalid_curve)
+            reliable = pd.Series(False, index=df_all.index)
+        evaluable_non_drinking = reliable
         tac_unknown_non_drinking = (~pred) & (~evaluable_non_drinking)
 
         totals = pd.DataFrame(
@@ -1391,33 +1372,30 @@ class dayFeatures():
             else pd.DataFrame(columns=['Category', 'n'])
         )
 
-        # Average 14-day burst composition: drinking vs sufficient-data non-drinking vs unknown (below quality or missing days).
-        # Mirrors evaluate_day_output.compute_burst_day_breakdown.
+        # Average 14-day burst composition: drinking vs reliable non-drinking vs unknown (unreliable or missing days).
         burst_breakdown_rows = []
         if (
             'SubID' in df_all.columns
             and 'Dataset_ID' in df_all.columns
             and pred_col in df_all.columns
-            and 'low_quality_percent' in df_all.columns
         ):
-            bd = df_all[['SubID', 'Dataset_ID', pred_col, 'low_quality_percent']].copy()
+            bd_cols = ['SubID', 'Dataset_ID', pred_col]
+            if 'prediction_reliable' in df_all.columns:
+                bd_cols.append('prediction_reliable')
+            bd = df_all[bd_cols].copy()
             bd['SubID'] = pd.to_numeric(bd['SubID'], errors='coerce')
             bd['Dataset_ID'] = pd.to_numeric(bd['Dataset_ID'], errors='coerce')
             bd = bd.dropna(subset=['SubID', 'Dataset_ID'])
 
             drinking = pd.to_numeric(bd[pred_col], errors='coerce').fillna(0) > 0
-            low_q = pd.to_numeric(bd['low_quality_percent'], errors='coerce').fillna(1.0)
-            min_hq = 0.75
-            meets_quality = low_q < (1.0 - min_hq)  # low_quality < 0.25
-            if 'device_worn_percent_of_day' in bd.columns:
-                worn = pd.to_numeric(bd['device_worn_percent_of_day'], errors='coerce').fillna(0.0)
-                meets_wear = worn >= min_hq
+            if 'prediction_reliable' in bd.columns:
+                reliable_bd = pd.to_numeric(bd['prediction_reliable'], errors='coerce').fillna(0) == 1
             else:
-                meets_wear = True
+                reliable_bd = pd.Series(False, index=bd.index)
 
             bd['_drinking_day'] = drinking.astype(int)
-            bd['_valid_non_drinking'] = ((~drinking) & meets_quality & meets_wear).astype(int)
-            bd['_below_quality_data'] = ((~drinking) & (~(meets_quality & meets_wear))).astype(int)
+            bd['_valid_non_drinking'] = ((~drinking) & reliable_bd).astype(int)
+            bd['_below_quality_data'] = ((~drinking) & (~reliable_bd)).astype(int)
 
             agg = (
                 bd.groupby(['SubID', 'Dataset_ID'])
@@ -1448,11 +1426,11 @@ class dayFeatures():
                             'n': f'{mean_drink:.1f} ({pct_drink:.0f}%)',
                         },
                         {
-                            'Category': 'Avg non-drinking days per 14-day burst (low_quality_percent < 0.25 AND device_worn_percent_of_day ≥ 0.75)',
+                            'Category': 'Avg non-drinking days per 14-day burst (prediction_reliable = 1)',
                             'n': f'{mean_valid:.1f} ({pct_valid:.0f}%)',
                         },
                         {
-                            'Category': 'Avg unknown days per 14-day burst (non-drinking days failing quality/wear OR missing day)',
+                            'Category': 'Avg unknown days per 14-day burst (non-drinking days with prediction_reliable = 0 OR missing day)',
                             'n': f'{mean_unknown:.1f} ({pct_unknown:.0f}%)',
                         },
                     ]
@@ -1494,16 +1472,12 @@ class dayFeatures():
                     pd.DataFrame(
                         [
                             {
-                                'Category': 'Unknown due to REGION_VALID=0 curve overlap (>1hr)',
-                                'n': int((df_all.get('unknown_reason', '') == 'invalid_region_curve').sum()),
+                                'Category': 'Unknown due to prediction_reliable = 0',
+                                'n': int((df_all.get('unknown_reason', '') == 'prediction_unreliable').sum()),
                             },
                             {
                                 'Category': 'Unknown due to missing Skyn day',
                                 'n': int((df_all.get('unknown_reason', '') == 'missing_day_expanded').sum()),
-                            },
-                            {
-                                'Category': 'Unknown due to low quality / insufficient data',
-                                'n': int((df_all.get('unknown_reason', '') == 'low_quality_day').sum()),
                             },
                         ]
                     )
@@ -1514,11 +1488,10 @@ class dayFeatures():
                 pd.DataFrame(
                     {
                         'Category': [
-                            'Note: Unknown days are days where drinking was NOT detected yet they have insufficient data '
-                            '(cannot make a TAC-based, rule-based conclusion)',
-                            '(e.g., any TAC curve flagged as invalid via REGION_VALID=0 overlap, or >25% low-quality minutes).',
+                            'Note: Unknown days are non-drinking days with prediction_reliable = 0, '
+                            'or days with no Skyn TAC row.',
                         ],
-                        'n': [np.nan, np.nan],
+                        'n': [np.nan],
                     }
                 ),
             ]
@@ -1526,62 +1499,69 @@ class dayFeatures():
         return pd.concat(head_parts, ignore_index=True)
 
     @staticmethod
-    def build_tac_self_report_methodology_dataframe(pred_col='predicted_drinking_day_by_curve_start'):
+    def build_tac_self_report_methodology_dataframe(pred_col='pred_drinking_day'):
         """
         User-facing explanations for the TAC + morning self-report validation workbook:
         column names, definitions, and how values are derived (no code references).
         """
         pc = pred_col
+        if pc == 'pred_drinking_day':
+            detection_text = (
+                f'Column: ``{pc}`` — 1 = drinking day, 0 = not.\n\n'
+                'This column is the 08.05 XGBoost drinking-day model (probability at least 0.5). '
+                'It is scored for every day after curve slots are attached, including days with no TAC. '
+                '``proba_drinking_day`` is the model probability. ``prediction_reliable`` is a separate flag: '
+                'a non-drinking day is a true or false negative only when that flag is 1.'
+            )
+        else:
+            detection_text = (
+                f'Column: ``{pc}`` — 1 = drinking day, 0 = not.\n\n'
+                'Primary rule: The day is 1 if at least one predicted-drinking curve '
+                '(``DRINKING_PRED`` = 1 in curve features) has its **start** in that calendar day: '
+                '``begin_CURVE`` ≥ ``begin_day`` and ``begin_CURVE`` < ``end_day``. '
+                'Minimum duration, ``REGION_VALID``, below-threshold, rise-phase, and other curve QC '
+                'are applied **when curves are built** (they determine whether ``DRINKING_PRED`` is 1); '
+                'the day-level overlap step only checks overlap with the day window and whether the curve start '
+                'falls inside it.\n\n'
+                'Secondary rule (OR): When ``above_threshold_percent_of_day`` and '
+                '``above_threshold_high_quality_percent`` are present on the day row, the day is also set to 1 '
+                'if ``above_threshold_percent_of_day`` ≥ 0.75 **and** '
+                '``above_threshold_high_quality_percent`` > 0.60. '
+                'The first is the fraction of the day with TAC at or above the curve threshold; the second is '
+                'the fraction of **above-threshold** time that is high quality. '
+                'This can flag a drinking day even when no predicted-drinking curve starts on that day.'
+            )
         rows = [
             (
                 'Drinking day detection',
-                (
-                    f'Column: ``{pc}`` — 1 = drinking day, 0 = not.\n\n'
-                    'Primary rule: The day is 1 if at least one predicted-drinking curve '
-                    '(``DRINKING_PRED`` = 1 in curve features) has its **start** in that calendar day: '
-                    '``begin_CURVE`` ≥ ``begin_day`` and ``begin_CURVE`` < ``end_day``. '
-                    'Minimum duration, ``REGION_VALID``, below-threshold, rise-phase, and other curve QC '
-                    'are applied **when curves are built** (they determine whether ``DRINKING_PRED`` is 1); '
-                    'the day-level overlap step only checks overlap with the day window and whether the curve start '
-                    'falls inside it.\n\n'
-                    'Secondary rule (OR): When ``above_threshold_percent_of_day`` and '
-                    '``above_threshold_high_quality_percent`` are present on the day row, the day is also set to 1 '
-                    'if ``above_threshold_percent_of_day`` ≥ 0.75 **and** '
-                    '``above_threshold_high_quality_percent`` > 0.60. '
-                    'The first is the fraction of the day with TAC at or above the curve threshold; the second is '
-                    'the fraction of **above-threshold** time that is high quality. '
-                    'This can flag a drinking day even when no predicted-drinking curve starts on that day.'
-                ),
+                detection_text,
             ),
             (
                 'Non-drinking vs sufficient-data non-drinking days',
                 (
                     f'Non-drinking day: ``{pc}`` = 0.\n\n'
                     'Sufficient-data non-drinking agreement: ``self_report_and_tac_comparison`` assigns true/false '
-                    f'negative only when ``{pc}`` = 0 and ``low_quality_percent`` < 0.25 and '
-                    '``device_worn_percent_of_day`` ≥ 0.75 and ``invalid_region_curve_overlap`` = 0.\n\n'
-                    'Invalid curve overlap rule: if a curve overlaps that day but a curve longer than 60 minutes has '
-                    'REGION_VALID = 0, the day is treated as insufficient data for TN/FN '
-                    '(``invalid_region_curve_overlap`` = 1) and counted as unknown.\n\n'
-                    f'If ``{pc}`` = 0 but the day fails the quality/wear/invalid-curve bar, labels ``true_unknown`` or '
+                    f'negative only when ``{pc}`` = 0 and ``prediction_reliable`` = 1.\n\n'
+                    'Unreliable prediction: if ``prediction_reliable`` = 0, a non-drinking day is '
+                    'unknown (not a true or false negative).\n\n'
+                    f'If ``{pc}`` = 0 and ``prediction_reliable`` = 0, labels ``true_unknown`` or '
                     '``false_unknown`` are used when self-report is present.\n\n'
                     'Agreement column on ``Morning_day_merge`` is ``self_report_and_tac_comparison`` '
                     '(same labels as Agreement_summary).'
                 ),
             ),
             (
-                'Low quality and unknown labels (non-drinking days)',
+                'Unreliable predictions and unknown labels (non-drinking days)',
                 (
-                    'Column: ``low_quality_percent`` — share of minute-level rows counted as low quality (0–1).\n\n'
-                    'Agreement use: drinking days (``{pc}`` = 1) are never set aside for day quality. For '
-                    'non-drinking days (``{pc}`` = 0), TN/FN only when ``low_quality_percent`` < 0.25 and '
-                    '``device_worn_percent_of_day`` ≥ 0.75. Otherwise (with SR present) labels are ``true_unknown`` '
-                    '(SR yes) or ``false_unknown`` (SR no).\n\n'
+                    '``prediction_reliable`` is 1 only when none of these fire: 6 or more hours not worn '
+                    '(24 minus wear time), 1 or more hours of TAC below −15, 1 or more hours of jumps plus plummets, '
+                    'or a drinking probability inside 0.05–0.95.\n\n'
+                    'Agreement use: drinking days (``{pc}`` = 1) are never set aside for reliability. For '
+                    'non-drinking days (``{pc}`` = 0), TN/FN only when ``prediction_reliable`` = 1. Otherwise '
+                    '(with self-report present) labels are ``true_unknown`` (SR yes) or ``false_unknown`` (SR no).\n\n'
                     '``unknown_sr_missing``: non-drinking day (``{pc}`` = 0), morning self-report missing, and '
-                    'the day fails the quality/wear bar (``low_quality_percent`` ≥ 0.25 or '
-                    '``device_worn_percent_of_day`` < 0.75). The row is unknown (insufficient data).\n\n'
-                    'Missing ``low_quality_percent``: if the column is absent, days with ``{pc}`` = 0 are all treated '
-                    'as meeting the quality bar for that agreement logic (TN/FN apply when otherwise appropriate).'
+                    '``prediction_reliable`` is not 1. The row is unknown.\n\n'
+                    'A missing ``prediction_reliable`` value is treated as not reliable.'
                 ).format(pc=pc),
             ),
             (
@@ -1602,13 +1582,12 @@ class dayFeatures():
                 'Agreement columns and workbook subsets',
                 (
                     '``self_report_and_tac_comparison`` (Morning_day_merge, Agreement_summary, burst mini-tables, plot labels): '
-                    'cross-classifies ``morning_self_report_alcohol`` vs ``{pc}`` '
-                    'with day-quality rules: for non-drinking days, TN/FN only when ``low_quality_percent`` < 0.25 '
-                    'and ``device_worn_percent_of_day`` ≥ 0.75; '
+                    'cross-classifies ``morning_self_report_alcohol`` vs ``{pc}``. '
+                    'For non-drinking days, TN/FN only when ``prediction_reliable`` = 1; '
                     'otherwise ``true_unknown`` / ``false_unknown`` when self-report is present. If morning '
                     'self-report is missing on a non-drinking day: ``unknown_sr_missing`` (unknown [SR missing] on '
-                    'plots) when the day fails the quality/wear bar; otherwise Negative TAC, no morning SR when the day '
-                    'has sufficient data to treat as non-drinking.\n\n'
+                    'plots) when ``prediction_reliable`` is not 1; otherwise Negative TAC, no morning SR when the day '
+                    'is a reliable non-drinking day.\n\n'
                     'Where ``inside_burst`` is used: Agreement_summary and the Burst_* sheets use only rows '
                     'with ``inside_burst`` = 1 when that column exists; otherwise all day rows are used.\n\n'
                     'Burst_* sheets: participant columns are ordered left to right from fewer to more drinking '
@@ -1619,7 +1598,7 @@ class dayFeatures():
         return pd.DataFrame(rows, columns=['Topic', 'Explanation'])
 
     @staticmethod
-    def build_tac_self_report_variable_key_dataframe(pred_col='predicted_drinking_day_by_curve_start'):
+    def build_tac_self_report_variable_key_dataframe(pred_col='pred_drinking_day'):
         """
         Stacked tables for the TAC + morning workbook ``Variable_key`` sheet: morning agreement
         columns, then curated day-level definitions from ``report_guide.day_feature_descriptions``.
@@ -1646,13 +1625,10 @@ class dayFeatures():
             'device_worn_percent_of_day',
             pred_col,
             'drinking_curve_overlap',
-            'predicted_drinking_curve_overlap',
-            'invalid_region_curve_overlap',
             'above_threshold_percent_of_day',
             'above_threshold_high_quality_percent',
             'below_threshold_percent',
             'total_curve_overlap_hours',
-            'predicted_drinking_overlap_hours',
         ]
         rows_d = [{'Variable': k, 'Description': dfd[k]} for k in day_keys if k in dfd]
 
@@ -1748,7 +1724,7 @@ class dayFeatures():
             return 'self-report: no drinking'
         return 'self-report: missing'
 
-    def _append_morning_tac_summary_stats(self, pred_col='predicted_drinking_day_by_curve_start'):
+    def _append_morning_tac_summary_stats(self, pred_col='pred_drinking_day'):
         """Append morning/TAC summary tables to ``day_stat_frames`` for main day Stats sheet."""
         if 'self_report_and_tac_comparison' not in self.day_features.columns:
             return
@@ -2090,7 +2066,7 @@ class dayFeatures():
     def add_morning_report_drink_agreement(
         self,
         morning_csv_path,
-        pred_col='predicted_drinking_day_by_curve_start',
+        pred_col='pred_drinking_day',
         self_report_col='mr_al_y',
         trigger_col='Trigger Name',
         id_col='id',
@@ -2107,7 +2083,7 @@ class dayFeatures():
     ):
         """
         Merge morning self-report onto ``self.day_features`` and add ``self_report_and_tac_comparison``
-        (HQ-stratified agreement vs ``pred_col``).
+        (agreement vs ``pred_col``, default ``pred_drinking_day``; non-drinking days need ``prediction_reliable`` = 1).
 
         Builds merge keys via ``prepare_morning_self_report_for_tac_merge``, which uses
         ``self.skyn_dates_metadata`` from ``filter_days_by_date_range`` when set (else reads
@@ -2115,7 +2091,7 @@ class dayFeatures():
         otherwise uses **day_no**. ``inside_burst`` is unchanged (set only in ``filter_days_by_date_range``).
 
         Optional ``extra_attach_cols`` are merged as QC-only morning fields (default: none).
-        Cohort scripts (e.g. LINC) should pass their column list explicitly.
+        Cohort scripts should pass their column list explicitly.
         """
         attach_cols = list(extra_attach_cols or ())
         if not os.path.isfile(morning_csv_path):
@@ -2130,8 +2106,6 @@ class dayFeatures():
                         self.day_features,
                         pred_col=pred_col,
                         sr_col='morning_self_report_alcohol',
-                        low_quality_col='low_quality_percent',
-                        min_high_quality_pct=0.75,
                     )
                 )
             else:
@@ -2179,7 +2153,7 @@ class dayFeatures():
 
         df = self.day_features.copy()
 
-        # Expand to full 14-day burst grid (LINC-style) before merging, so SR can appear on TAC-missing days.
+        # Expand to a full 14-day burst grid before merging, so SR can appear on TAC-missing days.
         meta = self._skyn_metadata_table_for_morning(
             skyn_dates_csv_path=skyn_dates_csv_path,
             metadata_id_column=metadata_id_column,
@@ -2188,7 +2162,7 @@ class dayFeatures():
             last_date_column=last_date_column,
         )
         if meta is not None and len(meta):
-            # Prefer an inferred day-start hour from observed begin_day; fallback to 6 (LINC).
+            # Prefer an inferred day-start hour from observed begin_day; fallback to 6.
             _h = 6
             if 'begin_day' in df.columns:
                 try:
@@ -2268,8 +2242,6 @@ class dayFeatures():
             df,
             pred_col=pred_col,
             sr_col='morning_self_report_alcohol',
-            low_quality_col='low_quality_percent',
-            min_high_quality_pct=0.75,
         )
 
         # Unknown breakdown: assign a reason label for day rows that were not evaluable
@@ -2281,18 +2253,16 @@ class dayFeatures():
             tac_missing = pd.to_numeric(df['tac_day_missing'], errors='coerce').fillna(0) == 1
         else:
             tac_missing = pd.Series(False, index=df.index)
-        if 'invalid_region_curve_overlap' in df.columns:
-            invalid_curve = pd.to_numeric(df['invalid_region_curve_overlap'], errors='coerce').fillna(0) == 1
+        if 'prediction_reliable' in df.columns:
+            unreliable = pd.to_numeric(df['prediction_reliable'], errors='coerce').fillna(0) != 1
         else:
-            invalid_curve = pd.Series(False, index=df.index)
+            unreliable = pd.Series(True, index=df.index)
 
         # Always label inserted scaffold rows explicitly (these are "missing day (expanded)" in the Excel filter).
         df.loc[tac_missing, 'unknown_reason'] = 'missing_day_expanded'
 
-        # For unknown-classified *observed* days, record the most specific reason.
-        df.loc[is_unknown & (~tac_missing) & invalid_curve, 'unknown_reason'] = 'invalid_region_curve'
-        # Remaining unknowns are treated as low-quality / insufficient-data days (quality or wear gating).
-        df.loc[is_unknown & (~tac_missing) & (df['unknown_reason'] == ''), 'unknown_reason'] = 'low_quality_day'
+        # Observed unknown days are non-drinking days with prediction_reliable != 1.
+        df.loc[is_unknown & (~tac_missing) & unreliable, 'unknown_reason'] = 'prediction_unreliable'
 
         self.day_features = df
 
@@ -2315,7 +2285,7 @@ class dayFeatures():
         output_path,
         morning_csv_path,
         plot_column='signal_processing_plot',
-        pred_col='predicted_drinking_day_by_curve_start',
+        pred_col='pred_drinking_day',
         row_interval=20,
         column_interval=12,
         x_scale=65 / 140,
@@ -2335,16 +2305,16 @@ class dayFeatures():
               selected day-level columns from ``report_guide.day_feature_descriptions`` (includes ``pred_col``)
             - ``Agreement_summary``: when ``inside_burst`` exists, counts of Skyn day rows **included**
               (1) vs **excluded** (0) for the burst/wear window; day-level self-report and TAC totals;
-              **HQ-stratified** agreement only (``self_report_and_tac_comparison``), including
+              agreement only (``self_report_and_tac_comparison``), including
               ``true_unknown`` / ``false_unknown``, ``unknown_sr_missing`` / ``unknown [SR missing]`` (no drinking day,
-              LQ≥25%, no morning; unknown due to low quality), and no-morning rows split by drinking-day vs HQ, plus a subtotal
+              ``prediction_reliable`` = 0, no morning), and no-morning rows split by drinking-day vs reliable non-drinking, plus a subtotal
               row, on the same ``inside_burst == 1`` subset as the burst grids (or all rows if ``inside_burst`` absent)
             - ``Burst_1``, ``Burst_2``, ``Burst_3``: **only** day rows with ``inside_burst == 1``;
               grid with days 1–14 on rows (TAC plot per cell); participant columns run left to right
               from fewer to more drinking days (count of ``pred_col`` = 1 days in that burst; ties keep
               groupby order). Per-participant agreement mini-tables use the same subset.
               One row above each plot shows a short agreement label (see ``agreement_burst_cell_display_label``;
-              includes ``unknown [SR missing]`` for ``unknown_sr_missing``: non-drinking day, no morning SR, LQ≥25%).
+              includes ``unknown [SR missing]`` for ``unknown_sr_missing``: non-drinking day, no morning SR, ``prediction_reliable`` = 0).
 
         Args:
             output_path: Path to ``.xlsx`` output
@@ -2832,7 +2802,6 @@ class dayFeatures():
     # ``curve_{n}_{suffix}`` on overlap slots -> ``hq_best_*`` for the max-HQ slot (same winner as attachment).
     _HQ_BEST_OVERLAP_SOURCES = (
         ('id', 'hq_best_curve_id'),
-        ('predicted_drinking', 'hq_best_predicted_drinking'),
         ('overlap_hours', 'hq_best_overlap_hours'),
         ('high_quality_duration', 'hq_best_high_quality_duration'),
         ('extends_prior_day', 'hq_best_extends_prior_day'),
@@ -3219,7 +3188,7 @@ class dayFeatures():
         and ensure ``median_prior_*`` columns are present (recomputes if absent).
 
         Per-slot curve features (``curve_{n}_*``) and ``median_prior_*`` are expected to
-        already exist on ``self.day_features`` from ``add_curve_overlap_detection``.  This
+        already exist on ``self.day_features`` from ``attach_curves_and_predict_drinking_days``.  This
         method is a thin wrapper that adds the annotation column and reorders columns for
         the workbook export.
 
@@ -3237,7 +3206,7 @@ class dayFeatures():
         out = self.day_features.copy()
         original_cols_order = list(out.columns)
         out['annotation_drinking_day'] = ''
-        # Ensure median_prior columns exist (no-op if already computed by add_curve_overlap_detection)
+        # Ensure median_prior columns exist (no-op if already computed by attach_curves_and_predict_drinking_days)
         if not any(c.startswith('median_prior_') for c in out.columns):
             dayFeatures.assign_median_prior_from_all_qualifying_curves(out)
             dayFeatures.assign_median_prior_day_region_tac(out)
@@ -3266,7 +3235,7 @@ class dayFeatures():
 
         ordered = list(original_cols_order)
         if ann in df.columns:
-            anchor_ann = 'predicted_drinking_overlap_hours'
+            anchor_ann = 'total_curve_overlap_hours'
             if anchor_ann in ordered:
                 ix = ordered.index(anchor_ann) + 1
                 ordered.insert(ix, ann)
@@ -3473,8 +3442,7 @@ class dayFeatures():
             file_name (str): Path to output Excel file
             split_plots_by (str, optional): How to split visualization tabs:
                 - None (default): All plots in one 'Day Plots' tab
-                - 'drinking': Split by predicted_drinking_curve_overlap (any overlap with predicted drinking curve)
-                - 'drinking_by_start': Split by predicted_drinking_day_by_curve_start (drinking curve starts in day)
+                - 'drinking_xgb': Split by pred_drinking_day (08.05 XGBoost)
             include_nonwear_plots (bool, optional): Whether to include non-wear detection plots (device_removal_plot). Default: True
             include_signal_processing_plots (bool, optional): Whether to include signal processing plots. Default: True
         """
@@ -3519,52 +3487,37 @@ class dayFeatures():
                 for col in plot_columns_to_include:
                     print(self.day_features[col])
                 
-                if split_plots_by == 'drinking' and 'predicted_drinking_curve_overlap' in self.day_features.columns:
-                    # Split by drinking days (overlap-based)
-                    drinking_days = self.day_features[self.day_features['predicted_drinking_curve_overlap'] == 1]
-                    non_drinking_days = self.day_features[self.day_features['predicted_drinking_curve_overlap'] == 0]
-                    
+                if split_plots_by in ('drinking', 'drinking_by_start'):
+                    warnings.warn(
+                        f"split_plots_by={split_plots_by!r} is no longer available. "
+                        "Use split_plots_by='drinking_xgb' (pred_drinking_day).",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                    split_plots_by = None
+
+                if split_plots_by == 'drinking_xgb' and 'pred_drinking_day' in self.day_features.columns:
+                    drinking_days = self.day_features[self.day_features['pred_drinking_day'] == 1]
+                    non_drinking_days = self.day_features[self.day_features['pred_drinking_day'] == 0]
+
                     if not non_drinking_days.empty:
                         embed_graphs_into_workbook_tab(
                             writer.book,
                             [non_drinking_days[col].tolist() for col in plot_columns_to_include],
-                            worksheet_name = 'Non-Drinking Days',
+                            worksheet_name = 'Non-Drinking Days (XGB)',
                             plot_header_text = '',
                             missing_plot_path_text = 'No Plot Available'
                         )
-                    
+
                     if not drinking_days.empty:
                         embed_graphs_into_workbook_tab(
                             writer.book,
                             [drinking_days[col].tolist() for col in plot_columns_to_include],
-                            worksheet_name = 'Drinking Days',
+                            worksheet_name = 'Drinking Days (XGB)',
                             plot_header_text = '',
                             missing_plot_path_text = 'No Plot Available'
                         )
-                
-                elif split_plots_by == 'drinking_by_start' and 'predicted_drinking_day_by_curve_start' in self.day_features.columns:
-                    # Split by drinking days (curve start-based)
-                    drinking_days = self.day_features[self.day_features['predicted_drinking_day_by_curve_start'] == 1]
-                    non_drinking_days = self.day_features[self.day_features['predicted_drinking_day_by_curve_start'] == 0]
-                    
-                    if not non_drinking_days.empty:
-                        embed_graphs_into_workbook_tab(
-                            writer.book,
-                            [non_drinking_days[col].tolist() for col in plot_columns_to_include],
-                            worksheet_name = 'Non-Drinking Days (by start)',
-                            plot_header_text = '',
-                            missing_plot_path_text = 'No Plot Available'
-                        )
-                    
-                    if not drinking_days.empty:
-                        embed_graphs_into_workbook_tab(
-                            writer.book,
-                            [drinking_days[col].tolist() for col in plot_columns_to_include],
-                            worksheet_name = 'Drinking Days (by start)',
-                            plot_header_text = '',
-                            missing_plot_path_text = 'No Plot Available'
-                        )
-                
+
                 else:
                     # Default: all plots in one tab
                     embed_graphs_into_workbook_tab(

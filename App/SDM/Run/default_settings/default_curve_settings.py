@@ -1,6 +1,6 @@
 """
 Default curve analysis settings.
-These settings are used by ACE, ARC, and LINC analysis scripts.
+These settings are used by cohort analysis scripts.
 """
 
 from App.SDM.Run.default_settings.default_flag_settings import DEFAULT_FLAG_SELECTIONS

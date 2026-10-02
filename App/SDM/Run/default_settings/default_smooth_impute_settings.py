@@ -1,6 +1,6 @@
 """
 Default smooth and impute settings for signal processing.
-These settings are used by ACE, ARC, and LINC analysis scripts.
+These settings are used by cohort analysis scripts.
 """
 
 DEFAULT_SMOOTH_AND_IMPUTE_ATTRS = {

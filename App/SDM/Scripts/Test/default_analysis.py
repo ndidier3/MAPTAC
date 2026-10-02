@@ -1,24 +1,26 @@
 """
 Test Analysis Script with Drinking Detection
 
-This script processes SKYN data and performs curve-level and day-level analysis
-with automated drinking curve identification based on quality and shape criteria.
+This script processes SKYN data and performs curve-level and day-level analysis.
 
-Drinking Detection Implementation:
-- Identifies curves likely to represent drinking events using:
-  1. Two-phase high-quality duration threshold:
-     Phase 1 (30-60 min): 9 non-HQ minutes allowed per 15-min block
-     Phase 2 (60+ min): 5 additional HQ minutes required per 15-min block
-  2. Not flagged as flat curve (FLAG_flat_curve == 0)
-  3. Has complete rise phase (FLAG_incomplete_curve_start_curve == 0)
-- Creates DRINKING_PRED column for curves
-- Creates predicted_drinking_day_by_curve_start column for days (1 if drinking curve starts in day)
-- Exports separate visualization tabs for drinking vs. non-drinking curves/days
+Day-level drinking prediction is the 08.05 XGBoost model (pred_drinking_day),
+scored when curve overlap is attached. Reliability flags are written alongside it.
+
+Curve-level DRINKING_PRED (quality and shape rules) is still computed for curve
+workbook splits. Day-level drinking is pred_drinking_day only.
 """
+
+import sys
+from pathlib import Path
+
+# Repo root must be importable as ``App`` when this file is run as a script.
+_script_dir = Path(__file__).resolve().parent
+_project_root = _script_dir.parent.parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 import pandas as pd
 import os
-from pathlib import Path
 from App.SDM.Run.process_many import *
 from App.SDM.Analysis.curveFeatures import curveFeatures
 from App.SDM.Analysis.dayFeatures import dayFeatures
@@ -34,9 +36,8 @@ from App.SDM.Scripts.Test.test_settings import (
 smooth_and_impute_attrs['export_excel'] = False
 
 # Dynamic path resolution - works regardless of where project is cloned
-# Get the project root by going up from this script's location
-script_dir = Path(__file__).parent.absolute()
-project_root = script_dir.parent.parent.parent.parent.absolute()
+script_dir = _script_dir
+project_root = _project_root
 
 # Alternative method using os.path (more compatible with older Python versions)
 # script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -97,16 +98,27 @@ print(f"\nRunning day-level analysis...")
 day_features_calculator = dayFeatures(processed_data_folder)
 day_features_calculator.compute_low_quality_stats()  # Computes stats and adds to day_stat_frames
 
-# Add curve overlap detection using curve features from the curves object
-# This uses the DRINKING_PRED column to create:
-#   - predicted_drinking_curve_overlap (any overlap)
-#   - predicted_drinking_day_by_curve_start (curve starts in day)
-day_features_calculator.add_curve_overlap_detection(curves.curve_features)
+# Attach curve slots and score the 08.05 drinking-day model
+# (pred_drinking_day, proba_drinking_day, reliability flags).
+flag_non_wear_hours = 6
+flag_very_negative_hours = 1
+flag_artifact_hours = 1
+flag_proba_low = 0.05
+flag_proba_high = 0.95
 
-# Export day workbook with drinking day splits
+day_features_calculator.attach_curves_and_predict_drinking_days(
+    curves.curve_features,
+    flag_non_wear_hours=flag_non_wear_hours,
+    flag_very_negative_hours=flag_very_negative_hours,
+    flag_artifact_hours=flag_artifact_hours,
+    flag_proba_low=flag_proba_low,
+    flag_proba_high=flag_proba_high,
+)
+
+# Export day workbook with XGB drinking-day splits
 day_features_calculator.export_workbook_days(
     str(project_root / 'Results' / cohort_name / f'{cohort_name}_day_stats_{today}.xlsx'),
-    split_plots_by='drinking_by_start',  # Split plots by days where drinking curves start
+    split_plots_by='drinking_xgb',
     include_nonwear_plots=True,
     include_signal_processing_plots=True
 )
@@ -114,12 +126,13 @@ day_features_calculator.export_workbook_days(
 print(f"\nTest analysis complete!")
 print(f"Results exported to: {project_root / 'Results' / cohort_name}")
 print(f"- {cohort_name}_curve_stats_{today}.xlsx (curve-level stats with 'Drinking Curves' and 'Non-Drinking Curves' tabs)")
-print(f"- {cohort_name}_day_stats_{today}.xlsx (day-level stats with 'Drinking Days (by start)' and 'Non-Drinking Days (by start)' tabs)")
-print(f"\nDrinking day classification:")
-print(f"  - Days classified as 'Drinking Days' if a predicted drinking curve STARTS within the day")
-print(f"\nDrinking detection criteria:")
-print(f"  - High-quality duration > required threshold (two-phase algorithm):")
-print(f"    Phase 1 (30-60 min): 9 non-HQ minutes allowed per 15-min block")
-print(f"    Phase 2 (60+ min): 5 additional HQ minutes required per 15-min block")
-print(f"  - FLAG_flat_curve == 0 (not flat)")
-print(f"  - FLAG_incomplete_curve_start_curve == 0 (complete rise phase)")
+print(f"- {cohort_name}_day_stats_{today}.xlsx (day-level stats with 'Drinking Days (XGB)' and 'Non-Drinking Days (XGB)' tabs)")
+print(f"\nDay-level drinking prediction:")
+print(f"  - pred_drinking_day / proba_drinking_day from the 08.05 XGBoost model")
+print(
+    f"  - prediction_reliable is 0 when non-wear (24h minus wear time) is {flag_non_wear_hours:g}+ hours,"
+)
+print(
+    f"    very negative TAC is {flag_very_negative_hours:g}+ hours, artifacts are {flag_artifact_hours:g}+ hours, "
+    f"or probability is in [{flag_proba_low:g}, {flag_proba_high:g}]"
+)
