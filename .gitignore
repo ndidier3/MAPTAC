@@ -27,6 +27,7 @@ sdm_single_file.spec
 .vscode
 batch_out/
 *.sh
+!batch_scripts/sdm_test_run.sh
 Inputs/Skyn_Data_PROCESSED/*
 App/SDM/Scripts/ACE
 App/SDM/Scripts/ARC

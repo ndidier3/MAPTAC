@@ -58,7 +58,32 @@ Heavy runs are often split so you do not repeat expensive steps:
 2. **`process_curves_and_events.py`** — load prior saves, identify curves/days, match events (if any)
 3. **`analysis/*.py`** — cohort statistics and exports
 
-The **Test** cohort is the simplest full example in one file: [App/SDM/Scripts/Test/default_analysis.py](App/SDM/Scripts/Test/default_analysis.py).
+The **Test** cohort is the simplest full example in one file: [App/SDM/Scripts/Test/default_analysis.py](App/SDM/Scripts/Test/default_analysis.py). It reprocesses the nine raw files in `Inputs/Skyn_Data_RAW/TestData` and writes `Results/Test`.
+
+---
+
+## Day-level drinking detection
+
+Day-level drinking is an XGBoost model, not a curve-overlap rule. After day features and curve slots are attached, `dayFeatures.attach_curves_and_predict_drinking_days` scores every social day (06:00–06:00). The stored model is `App/SDM/Trained_Models/xgb_drinking_day_v0805.json` (XGBoost 2.1.4). Scoring code is `App/SDM/Machine_Learning/drinking_day_xgb.py`. Training details, the 150 inputs, and leave-one-subject-out metrics are in [App/SDM/Trained_Models/drinking_day_xgb_README.md](App/SDM/Trained_Models/drinking_day_xgb_README.md).
+
+The training labels are human reviews of TAC plots (`annotation_drinking_day`), not morning self-report and not a laboratory alcohol assay. On the 2,361 labeled device-on days used for training, leave-one-subject-out accuracy was 0.956 (sensitivity 0.934, specificity 0.964, ROC AUC 0.990).
+
+| Column | Meaning |
+|--------|---------|
+| `pred_drinking_day` | 1 when the predicted probability is at least 0.5 |
+| `proba_drinking_day` | Predicted probability of a drinking day |
+| `prediction_reliable` | 1 only when none of the flags below are 1 |
+
+`prediction_reliable` is 0 when any of these is true. The cutoffs are arguments of `attach_curves_and_predict_drinking_days` (the Test script sets the defaults below):
+
+| Argument | Default in the Test script | Flag |
+|----------|----------------------------|------|
+| `flag_non_wear_hours` | 6 | Hours not worn are at least this value. Not worn = 24 − `device_worn_duration` (powered-off or missing time plus on-device non-wear). |
+| `flag_very_negative_hours` | 1 | `extreme_negative_duration` (TAC &lt; −15) is at least this many hours |
+| `flag_artifact_hours` | 1 | `jump_duration` + `plummet_duration` is at least this many hours |
+| `flag_proba_low`, `flag_proba_high` | 0.05, 0.95 | `proba_drinking_day` falls inside this inclusive interval |
+
+Days with no TAC are still scored. A powered-off day is usually predicted non-drinking and is marked unreliable. Curve-level `DRINKING_PRED` (from `identify_drinking_curves`) is a separate label and is not copied onto the day table. Day workbooks split plots with `split_plots_by='drinking_xgb'`.
 
 ---
 
@@ -67,7 +92,7 @@ The **Test** cohort is the simplest full example in one file: [App/SDM/Scripts/T
 Settings are layered:
 
 1. **Defaults** — `App/SDM/Run/default_settings/` (`default_curve_settings.py`, `default_flag_settings.py`, `default_smooth_impute_settings.py`)
-2. **Cohort file** — e.g. `linc_settings.py`, `ace_settings.py` (imports defaults, overrides threshold, day start hour, event columns, etc.)
+2. **Cohort file** — e.g. `cohort_example_settings.py`, `ace_settings.py` (imports defaults, overrides threshold, day start hour, event columns, etc.)
 3. **Script call** — arguments passed to `process_and_analyze_data()` control which pipeline steps run
 
 Common arguments when calling `process_and_analyze_data()`:
@@ -112,6 +137,8 @@ conda activate sdm-env
 python App/SDM/Scripts/...
 conda deactivate
 ```
+
+`batch_scripts/sdm_test_run.sh` is the small drinking-day smoke test. It activates `sdm-env` and runs `App/SDM/Scripts/Test/default_analysis.py`, which scores days with the 08.05 model and writes `Results/Test`. Submit it from the repo root with `sbatch batch_scripts/sdm_test_run.sh`. Other cohort shell scripts are local to this cluster account and are not in git.
 
 ### Naming
 
@@ -167,6 +194,7 @@ Per-run processing also writes under `Results/{COHORT}/{MM.DD.YYYY}/` (combined 
 | Topic | Location |
 |-------|----------|
 | End-to-end script (single file) | [App/SDM/Scripts/Test/default_analysis.py](App/SDM/Scripts/Test/default_analysis.py) |
+| Drinking-day model | [App/SDM/Trained_Models/drinking_day_xgb_README.md](App/SDM/Trained_Models/drinking_day_xgb_README.md) |
 | Process / analyze skeleton | [App/SDM/Scripts/CohortExample/](App/SDM/Scripts/CohortExample/) |
 | Cohort settings template | [App/SDM/Scripts/CohortExample/cohort_example_settings.py](App/SDM/Scripts/CohortExample/cohort_example_settings.py) |
 
@@ -193,9 +221,10 @@ conda install -c conda-forge kneed=0.7.0 scikit-learn=1.3.0
 ### Quick start
 
 ```bash
-# Local smoke test
+# Local smoke test, from the repo root.
+# The script adds the repo root to the import path itself.
 python App/SDM/Scripts/Test/default_analysis.py
 
-# Or on the cluster
+# Or on the cluster (same script; 1 hour / 4G request)
 sbatch batch_scripts/sdm_test_run.sh
 ```
