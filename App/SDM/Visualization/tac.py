@@ -11,6 +11,31 @@ from .plotting_utils import *
 import numpy as np
 from sklearn.tree import plot_tree
 
+
+def _resolve_fontfamily(requested):
+  """Prefer ``requested``; fall back to common Times-compatible faces on Linux."""
+  if not requested:
+    return None
+  try:
+    from matplotlib import font_manager
+    available = {f.name for f in font_manager.fontManager.ttflist}
+  except Exception:
+    available = set()
+  for name in (requested, 'Times New Roman', 'Nimbus Roman', 'Liberation Serif',
+               'STIXGeneral', 'DejaVu Serif'):
+    if name in available:
+      return name
+  return requested
+
+
+_DEFAULT_TITLE_STATS_BBOX = {
+  'boxstyle': 'round,pad=0.35',
+  'facecolor': 'white',
+  'edgecolor': 'black',
+  'linewidth': 0.9,
+  'alpha': 1.0,
+}
+
 def plot_smoothed_curve(df, plot_path, subid, dataset_identifier, event_number, peak, curve_threshold, title = "TAC Curve", event_timestamps = {}, df_version = 'SEARCH', subtitle_text = '', tac_column = 'TAC'):
   peak_time = df.loc[df[tac_column]==peak, 'datetime']
   # graph_cutoff = curve_ends + ((len(df) - curve_ends)*0.25)
@@ -55,7 +80,90 @@ def plot_smoothed_curve(df, plot_path, subid, dataset_identifier, event_number, 
 
 def plot_signal_processing(df, plot_path, subid, event_number, dataset_identifier, df_version, 
                            curve_threshold, time_variable='datetime', title='Signal Processing', 
-                           event_timestamps={}, subtitle_text='', show_imputations = True):
+                           event_timestamps={}, subtitle_text='', show_imputations = True,
+                           clean_event_labels=False, title_stats='',
+                           axis_label_fontsize=None, tick_label_fontsize=None,
+                           x_tick_label_fontsize=None, annotation_fontsize=10,
+                           title_fontsize=18, title_stats_fontsize=11,
+                           legend_fontsize=None, axis_label_fontweight=None,
+                           time_tick_format='%H:%M', x_tick_rotation=45,
+                           legend_bbox_to_anchor=(1.1, 1.1),
+                           title_ha='center', title_x=0.5,
+                           show_legend=True, filename_suffix='',
+                           figsize=(16, 7), flagged_marker_size=20,
+                           passed_marker_size=36, imputed_marker_size=36,
+                           xlabel='Time', dpi=None,
+                           title_stats_ha=None, title_stats_x=None,
+                           title_stats_same_line=False,
+                           fontfamily=None, title_stats_bbox=None,
+                           pin_title=False):
+  """
+  Plot TAC signal-processing figure.
+
+  clean_event_labels : bool
+      If True, rename drinkStart_* / drinkFinish_* keys to "Drink Start" / "Drink End"
+      before drawing. Default False preserves raw pipeline labels (skyn_dataset).
+  title_stats : str
+      Optional Drinks/eBAC line under the main title (e.g. "Drinks: 6  |  eBAC: 0.085").
+  subtitle_text : str
+      Optional middle subtitle (e.g. flagging reasons). With ``pin_title=True`` or
+      non-empty ``title_stats``, drawn in the pinned manuscript header; otherwise
+      uses the classic centered italic subtitle under ``set_title``.
+  pin_title : bool
+      If True, always use the pinned manuscript title layout (title / optional
+      subtitle / optional title_stats) after tight_layout.
+  """
+  resolved_font = _resolve_fontfamily(fontfamily)
+  _prev_font = None
+  if resolved_font:
+    _prev_font = plt.rcParams['font.family']
+    plt.rcParams['font.family'] = resolved_font
+  try:
+    return _plot_signal_processing_body(
+      df, plot_path, subid, event_number, dataset_identifier, df_version,
+      curve_threshold, time_variable=time_variable, title=title,
+      event_timestamps=event_timestamps, subtitle_text=subtitle_text,
+      show_imputations=show_imputations, clean_event_labels=clean_event_labels,
+      title_stats=title_stats, axis_label_fontsize=axis_label_fontsize,
+      tick_label_fontsize=tick_label_fontsize,
+      x_tick_label_fontsize=x_tick_label_fontsize,
+      annotation_fontsize=annotation_fontsize, title_fontsize=title_fontsize,
+      title_stats_fontsize=title_stats_fontsize, legend_fontsize=legend_fontsize,
+      axis_label_fontweight=axis_label_fontweight,
+      time_tick_format=time_tick_format, x_tick_rotation=x_tick_rotation,
+      legend_bbox_to_anchor=legend_bbox_to_anchor, title_ha=title_ha,
+      title_x=title_x, show_legend=show_legend, filename_suffix=filename_suffix,
+      figsize=figsize, flagged_marker_size=flagged_marker_size,
+      passed_marker_size=passed_marker_size,
+      imputed_marker_size=imputed_marker_size, xlabel=xlabel, dpi=dpi,
+      title_stats_ha=title_stats_ha, title_stats_x=title_stats_x,
+      title_stats_same_line=title_stats_same_line,
+      title_stats_bbox=title_stats_bbox, pin_title=pin_title,
+    )
+  finally:
+    if _prev_font is not None:
+      plt.rcParams['font.family'] = _prev_font
+
+
+def _plot_signal_processing_body(df, plot_path, subid, event_number, dataset_identifier, df_version, 
+                           curve_threshold, time_variable='datetime', title='Signal Processing', 
+                           event_timestamps={}, subtitle_text='', show_imputations = True,
+                           clean_event_labels=False, title_stats='',
+                           axis_label_fontsize=None, tick_label_fontsize=None,
+                           x_tick_label_fontsize=None, annotation_fontsize=10,
+                           title_fontsize=18, title_stats_fontsize=11,
+                           legend_fontsize=None, axis_label_fontweight=None,
+                           time_tick_format='%H:%M', x_tick_rotation=45,
+                           legend_bbox_to_anchor=(1.1, 1.1),
+                           title_ha='center', title_x=0.5,
+                           show_legend=True, filename_suffix='',
+                           figsize=(16, 7), flagged_marker_size=20,
+                           passed_marker_size=36, imputed_marker_size=36,
+                           xlabel='Time', dpi=None,
+                           title_stats_ha=None, title_stats_x=None,
+                           title_stats_same_line=False,
+                           title_stats_bbox=None, pin_title=False):
+  """Inner implementation of ``plot_signal_processing`` (font already applied)."""
   passed = df.loc[
     (df['imp_cand']==0)
   ]
@@ -69,34 +177,34 @@ def plot_signal_processing(df, plot_path, subid, event_number, dataset_identifie
   proximal_low_quality = df.loc[(df['proximal_low_quality_imp_cand'] == 1)]
 
   # Create a figure and axis
-  fig, ax = plt.subplots(figsize=(16, 7))
+  fig, ax = plt.subplots(figsize=figsize)
   
   #Smoothed Final TAC
   ax.plot(df[time_variable], df['TAC' if show_imputations else 'TAC_pre_imputation'], label="TAC (Processed)", alpha=0.5, color="black", linewidth = 2)
   
   #Passed (high quality values) - use final TAC since passed data is not imputed
   ax.scatter(passed[time_variable], passed['TAC' if show_imputations else 'TAC_pre_imputation'], label='Passed', 
-             color='darkblue', marker='.', alpha=1.0)
+             color='darkblue', marker='.', alpha=1.0, s=passed_marker_size)
   #Non Wear
   if not non_wear.empty:
     ax.scatter(non_wear[time_variable], non_wear['TAC_pre_imputation'], label='Non-Wear', 
-             color='lightpink', marker='x', alpha=0.7, s=20)
-  #Extreme Negative
+             color='lightpink', marker='x', alpha=0.7, s=flagged_marker_size)
+  #Extreme Negative (display label: Very Negative)
   if not extreme_negative.empty:
-    ax.scatter(extreme_negative[time_variable], extreme_negative['TAC_pre_imputation'], label='Extreme Negative', 
-             color='lightsteelblue', marker='*', alpha=0.7, s=20)
+    ax.scatter(extreme_negative[time_variable], extreme_negative['TAC_pre_imputation'], label='Very Negative', 
+             color='lightsteelblue', marker='*', alpha=0.7, s=flagged_marker_size)
   #Jumps
   if not jumps.empty:
     ax.scatter(jumps[time_variable], jumps['TAC_pre_imputation'], label='Jump', 
-              color='lightblue', marker='^', alpha=0.7, s=20)
+              color='lightblue', marker='^', alpha=0.7, s=flagged_marker_size)
   #Plummet
   if not plummet.empty:
     ax.scatter(plummet[time_variable], plummet['TAC_pre_imputation'], label='Plummet', 
-              color='thistle', marker='v', alpha=0.7, s=20)
+              color='thistle', marker='v', alpha=0.7, s=flagged_marker_size)
   # Between low quality
   if not proximal_low_quality.empty:
     ax.scatter(proximal_low_quality[time_variable], proximal_low_quality['TAC_pre_imputation'],
-               label='Proximal Low Quality', color='gray', marker='s', alpha=0.7, s=20)
+               label='Proximal Low Quality', color='gray', marker='s', alpha=0.7, s=flagged_marker_size)
     
   # Imputed data
   if show_imputations:
@@ -108,52 +216,172 @@ def plot_signal_processing(df, plot_path, subid, event_number, dataset_identifie
     proximal_low_quality_imputed = df.loc[df['proximal_low_quality_imputed'] == 1]
     if not gap_imputed.empty:
       ax.scatter(gap_imputed[time_variable], gap_imputed['TAC_pre_savgol'], label='Imputed Gap', 
-                marker='o', alpha=1.0, facecolor='gray', edgecolors="black")
+                marker='o', alpha=1.0, facecolor='gray', edgecolors="black", s=imputed_marker_size)
     if not non_wear_imputed.empty:
       ax.scatter(non_wear_imputed[time_variable], non_wear_imputed['TAC_pre_savgol'], 
-                label='Imputed Non-Wear', facecolor='lightpink', edgecolors= "darkred", marker='o', alpha=1.0)
+                label='Imputed Non-Wear', facecolor='lightpink', edgecolors= "darkred", marker='o', alpha=1.0,
+                s=imputed_marker_size)
     if not extreme_negative_imputed.empty:
       ax.scatter(extreme_negative_imputed[time_variable], extreme_negative_imputed['TAC_pre_savgol'], 
-                label='Imputed Extreme Negative', facecolor='lightsteelblue', edgecolors= "purple", marker='o', alpha=1.0)
+                label='Imputed Very Negative', facecolor='lightsteelblue', edgecolors= "purple", marker='o', alpha=1.0,
+                s=imputed_marker_size)
     if not jump_imputed.empty:
       ax.scatter(jump_imputed[time_variable], jump_imputed['TAC_pre_savgol'], 
-                label='Imputed Jump', facecolor='lightblue', edgecolors= "darkblue", marker='o', alpha=1.0)
+                label='Imputed Jump', facecolor='lightblue', edgecolors= "darkblue", marker='o', alpha=1.0,
+                s=imputed_marker_size)
     if not plummet_imputed.empty:
       ax.scatter(plummet_imputed[time_variable], plummet_imputed['TAC_pre_savgol'], 
-                label='Imputed Plummet', facecolor='thistle', edgecolors= "purple", marker='o', alpha=1.0)
+                label='Imputed Plummet', facecolor='thistle', edgecolors= "purple", marker='o', alpha=1.0,
+                s=imputed_marker_size)
     if not proximal_low_quality_imputed.empty:
       ax.scatter(proximal_low_quality_imputed[time_variable], proximal_low_quality_imputed['TAC_pre_savgol'],
-                label='Imputed Proximal Low Quality', facecolor='gray', edgecolors="darkgreen", marker='o', alpha=1.0)
+                label='Imputed Proximal Low Quality', facecolor='gray', edgecolors="darkgreen", marker='o', alpha=1.0,
+                s=imputed_marker_size)
   
   # Plot threshold line
   ax.hlines(curve_threshold, xmin=df['datetime'].min(), xmax=df['datetime'].max(), 
             colors='black', linestyle='--', label="Curve Threshold")
 
   # Plot event timestamps if available
-  if event_timestamps and all(value is not None for value in event_timestamps.values()):
-    plot_event_lines(df, ax, event_timestamps, 'datetime', 'datetime', font_size=10)
+  plot_events = event_timestamps
+  if clean_event_labels and event_timestamps:
+    plot_events = {}
+    for key, ts in event_timestamps.items():
+      k = str(key)
+      if 'drinkStart' in k:
+        label = 'Drink Start'
+      elif 'drinkFinish' in k:
+        label = 'Drink End'
+      else:
+        label = key
+      # Avoid colliding keys if multiple drink events share a cleaned name
+      if label in plot_events and label != key:
+        n = 2
+        while f'{label} ({n})' in plot_events:
+          n += 1
+        label = f'{label} ({n})'
+      plot_events[label] = ts
+
+  if plot_events and all(value is not None for value in plot_events.values()):
+    plot_event_lines(
+      df, ax, plot_events, 'datetime', 'datetime', font_size=annotation_fontsize,
+    )
 
   # Format the x-axis for time
   ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
-  ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+  ax.xaxis.set_major_formatter(mdates.DateFormatter(time_tick_format))
 
   # Add labels, title, and legend
-  ax.set_xlabel('Time')
-  ax.set_ylabel('TAC')
-  ax.set_title(title, fontsize=18, fontweight="semibold", pad=25)
-  plt.xticks(rotation=45)
-  ax.legend(loc='upper right', bbox_to_anchor=(1.1, 1.1), ncol=2, 
-           frameon=True, framealpha=1, edgecolor='black', facecolor='white')
+  axis_kwargs = {}
+  if axis_label_fontsize:
+    axis_kwargs['fontsize'] = axis_label_fontsize
+  if axis_label_fontweight:
+    axis_kwargs['fontweight'] = axis_label_fontweight
+  ax.set_xlabel(xlabel, **axis_kwargs)
+  ax.set_ylabel('TAC', **axis_kwargs)
+  x_tick_fs = x_tick_label_fontsize if x_tick_label_fontsize is not None else tick_label_fontsize
+  y_tick_fs = tick_label_fontsize
+  stats = (title_stats or '').strip()
+  sub = (subtitle_text or '').strip()
+  use_pinned = bool(pin_title) or bool(stats)
+  if sub and not use_pinned:
+    # Classic skyn_dataset header (title + centered italic subtitle)
+    ax.set_title(title, fontsize=title_fontsize, fontweight="semibold", pad=25)
+  for label in ax.get_xticklabels():
+    label.set_rotation(x_tick_rotation)
+    if x_tick_fs:
+      label.set_fontsize(x_tick_fs)
+  if y_tick_fs:
+    for label in ax.get_yticklabels():
+      label.set_fontsize(y_tick_fs)
+  if show_legend:
+    legend_kwargs = {}
+    if legend_fontsize:
+      legend_kwargs['fontsize'] = legend_fontsize
+    ax.legend(loc='upper right', bbox_to_anchor=legend_bbox_to_anchor, ncol=2,
+             frameon=True, framealpha=1, edgecolor='black', facecolor='white',
+             **legend_kwargs)
 
-  # Add subtitle
-  ax.text(0.5, 1.025, subtitle_text, fontsize=10, style='italic',
-          ha='center', va='center', transform=ax.transAxes)
+  # Classic centered italic subtitle (only when not using pinned manuscript header)
+  if sub and not use_pinned:
+    ax.text(0.5, 1.025, sub, fontsize=10, style='italic',
+            ha='center', va='center', transform=ax.transAxes)
   
   # Save the figure
   df_version = df_version if show_imputations else f'{df_version}_raw'
-  path = f'{plot_path}{subid}_{dataset_identifier}_{event_number}_TAC_processing_{df_version}.png'
+  suffix = filename_suffix or ''
+  path = (
+    f'{plot_path}{subid}_{dataset_identifier}_{event_number}'
+    f'_TAC_processing_{df_version}{suffix}.png'
+  )
   plt.tight_layout()
-  plt.savefig(path, bbox_inches='tight')
+  # Manuscript-style title / optional flag subtitle / optional Drinks/eBAC
+  if use_pinned:
+    stats_ha = title_ha if title_stats_ha is None else title_stats_ha
+    stats_x = title_x if title_stats_x is None else title_stats_x
+    if title_stats_bbox is True:
+      stats_bbox = dict(_DEFAULT_TITLE_STATS_BBOX)
+    elif isinstance(title_stats_bbox, dict):
+      stats_bbox = dict(_DEFAULT_TITLE_STATS_BBOX)
+      stats_bbox.update(title_stats_bbox)
+    else:
+      stats_bbox = None
+    stats_kwargs = {}
+    if stats_bbox is not None:
+      stats_kwargs['bbox'] = stats_bbox
+
+    if title_stats_same_line and stats and not sub:
+      y = 1.04
+      ax.text(
+        title_x, y, title, transform=ax.transAxes, fontsize=title_fontsize,
+        fontweight='semibold', ha=title_ha, va='bottom', clip_on=False,
+      )
+      ax.text(
+        stats_x, y, stats, transform=ax.transAxes, fontsize=title_stats_fontsize,
+        ha=stats_ha, va='bottom', clip_on=False, **stats_kwargs,
+      )
+    elif sub and stats:
+      ax.text(
+        title_x, 1.14, title, transform=ax.transAxes, fontsize=title_fontsize,
+        fontweight='semibold', ha=title_ha, va='bottom', clip_on=False,
+      )
+      ax.text(
+        title_x, 1.07, sub, transform=ax.transAxes,
+        fontsize=max(10, int(title_stats_fontsize) - 2),
+        style='italic', ha=title_ha, va='bottom', clip_on=False,
+      )
+      ax.text(
+        stats_x, 1.01, stats, transform=ax.transAxes, fontsize=title_stats_fontsize,
+        ha=stats_ha, va='bottom', clip_on=False, **stats_kwargs,
+      )
+    elif stats:
+      ax.text(
+        title_x, 1.08, title, transform=ax.transAxes, fontsize=title_fontsize,
+        fontweight='semibold', ha=title_ha, va='bottom', clip_on=False,
+      )
+      ax.text(
+        stats_x, 1.015, stats, transform=ax.transAxes, fontsize=title_stats_fontsize,
+        ha=stats_ha, va='bottom', clip_on=False, **stats_kwargs,
+      )
+    elif sub:
+      ax.text(
+        title_x, 1.08, title, transform=ax.transAxes, fontsize=title_fontsize,
+        fontweight='semibold', ha=title_ha, va='bottom', clip_on=False,
+      )
+      ax.text(
+        title_x, 1.015, sub, transform=ax.transAxes,
+        fontsize=max(10, int(title_stats_fontsize) - 2),
+        style='italic', ha=title_ha, va='bottom', clip_on=False,
+      )
+    else:
+      ax.text(
+        title_x, 1.015, title, transform=ax.transAxes, fontsize=title_fontsize,
+        fontweight='semibold', ha=title_ha, va='bottom', clip_on=False,
+      )
+  save_kwargs = {'bbox_inches': 'tight'}
+  if dpi is not None:
+    save_kwargs['dpi'] = dpi
+  plt.savefig(path, **save_kwargs)
   plt.close('all')
   
   return path
